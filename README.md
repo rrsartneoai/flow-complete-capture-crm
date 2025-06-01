@@ -1,6 +1,4 @@
-Okay, this is a great project! Let's lay down the foundational documents. I'll generate the content for each requested `.md` file.
 
----
 
 **`readme.md`**
 ```markdown
