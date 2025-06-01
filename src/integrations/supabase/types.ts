@@ -9,7 +9,108 @@ export type Json =
 export type Database = {
   public: {
     Tables: {
-      [_ in never]: never
+      documents: {
+        Row: {
+          created_at: string | null
+          document_type: string
+          file_name: string
+          file_url: string | null
+          id: string
+          ocr_data: Json | null
+          updated_at: string | null
+          user_id: string
+          verification_status: string | null
+        }
+        Insert: {
+          created_at?: string | null
+          document_type: string
+          file_name: string
+          file_url?: string | null
+          id?: string
+          ocr_data?: Json | null
+          updated_at?: string | null
+          user_id: string
+          verification_status?: string | null
+        }
+        Update: {
+          created_at?: string | null
+          document_type?: string
+          file_name?: string
+          file_url?: string | null
+          id?: string
+          ocr_data?: Json | null
+          updated_at?: string | null
+          user_id?: string
+          verification_status?: string | null
+        }
+        Relationships: []
+      }
+      profiles: {
+        Row: {
+          created_at: string | null
+          email: string | null
+          first_name: string | null
+          id: string
+          last_name: string | null
+          phone: string | null
+          updated_at: string | null
+        }
+        Insert: {
+          created_at?: string | null
+          email?: string | null
+          first_name?: string | null
+          id: string
+          last_name?: string | null
+          phone?: string | null
+          updated_at?: string | null
+        }
+        Update: {
+          created_at?: string | null
+          email?: string | null
+          first_name?: string | null
+          id?: string
+          last_name?: string | null
+          phone?: string | null
+          updated_at?: string | null
+        }
+        Relationships: []
+      }
+      submissions: {
+        Row: {
+          agreement_signed_at: string | null
+          completed_at: string | null
+          created_at: string | null
+          crm_synced: boolean | null
+          id: string
+          signature_data: string | null
+          status: string | null
+          updated_at: string | null
+          user_id: string
+        }
+        Insert: {
+          agreement_signed_at?: string | null
+          completed_at?: string | null
+          created_at?: string | null
+          crm_synced?: boolean | null
+          id?: string
+          signature_data?: string | null
+          status?: string | null
+          updated_at?: string | null
+          user_id: string
+        }
+        Update: {
+          agreement_signed_at?: string | null
+          completed_at?: string | null
+          created_at?: string | null
+          crm_synced?: boolean | null
+          id?: string
+          signature_data?: string | null
+          status?: string | null
+          updated_at?: string | null
+          user_id?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never

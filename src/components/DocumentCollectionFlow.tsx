@@ -1,5 +1,5 @@
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
@@ -7,6 +7,8 @@ import DocumentUploader from "./DocumentUploader";
 import SignatureCapture from "./SignatureCapture";
 import CompletionScreen from "./CompletionScreen";
 import { useToast } from "@/hooks/use-toast";
+import { useAuth } from "@/contexts/AuthContext";
+import { supabase } from "@/integrations/supabase/client";
 import { CheckCircle, Circle, Clock } from "lucide-react";
 
 export interface DocumentType {
@@ -21,7 +23,9 @@ export interface DocumentType {
 
 const DocumentCollectionFlow = () => {
   const { toast } = useToast();
+  const { user } = useAuth();
   const [currentStep, setCurrentStep] = useState(0);
+  const [submissionId, setSubmissionId] = useState<string | null>(null);
   const [documents, setDocuments] = useState<DocumentType[]>([
     {
       id: "proof-id",
@@ -74,57 +78,188 @@ const DocumentCollectionFlow = () => {
     "Final Review"
   ];
 
+  // Load existing submission data
+  useEffect(() => {
+    if (user) {
+      loadSubmissionData();
+    }
+  }, [user]);
+
+  const loadSubmissionData = async () => {
+    if (!user) return;
+
+    try {
+      // Get user's submission
+      const { data: submission, error: submissionError } = await supabase
+        .from('submissions')
+        .select('*')
+        .eq('user_id', user.id)
+        .single();
+
+      if (submissionError && submissionError.code !== 'PGRST116') {
+        console.error('Error loading submission:', submissionError);
+        return;
+      }
+
+      if (submission) {
+        setSubmissionId(submission.id);
+        if (submission.status === 'completed') {
+          setWorkflowCompleted(true);
+          setCurrentStep(2);
+          return;
+        }
+        if (submission.signature_data) {
+          setSignatureCompleted(true);
+        }
+      }
+
+      // Get user's documents
+      const { data: userDocuments, error: docsError } = await supabase
+        .from('documents')
+        .select('*')
+        .eq('user_id', user.id);
+
+      if (docsError) {
+        console.error('Error loading documents:', docsError);
+        return;
+      }
+
+      if (userDocuments && userDocuments.length > 0) {
+        setDocuments(prev => prev.map(doc => {
+          const userDoc = userDocuments.find(ud => ud.document_type === doc.id);
+          if (userDoc) {
+            return {
+              ...doc,
+              uploaded: true,
+              verified: userDoc.verification_status === 'verified'
+            };
+          }
+          return doc;
+        }));
+      }
+    } catch (error) {
+      console.error('Error loading data:', error);
+    }
+  };
+
   const totalDocuments = documents.length;
   const uploadedDocuments = documents.filter(doc => doc.verified).length;
   const progress = (uploadedDocuments / totalDocuments) * 100;
 
-  const handleDocumentUploaded = (documentId: string, file: File, verified: boolean) => {
-    setDocuments(prev => prev.map(doc => 
-      doc.id === documentId 
-        ? { ...doc, uploaded: true, verified, file }
-        : doc
-    ));
+  const handleDocumentUploaded = async (documentId: string, file: File, verified: boolean) => {
+    if (!user) return;
 
-    if (verified) {
-      toast({
-        title: "Document Verified",
-        description: `${documents.find(d => d.id === documentId)?.name} has been successfully verified.`,
-      });
-    } else {
-      toast({
-        title: "Verification Failed",
-        description: "Please re-upload a clear, readable document.",
-        variant: "destructive",
-      });
+    try {
+      // Save document to database
+      const { error } = await supabase
+        .from('documents')
+        .upsert({
+          user_id: user.id,
+          document_type: documentId,
+          file_name: file.name,
+          verification_status: verified ? 'verified' : 'failed',
+          ocr_data: { filename: file.name, size: file.size }
+        });
+
+      if (error) {
+        console.error('Error saving document:', error);
+        toast({
+          title: "Save Error",
+          description: "Failed to save document. Please try again.",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      setDocuments(prev => prev.map(doc => 
+        doc.id === documentId 
+          ? { ...doc, uploaded: true, verified, file }
+          : doc
+      ));
+
+      if (verified) {
+        toast({
+          title: "Document Verified",
+          description: `${documents.find(d => d.id === documentId)?.name} has been successfully verified.`,
+        });
+      } else {
+        toast({
+          title: "Verification Failed",
+          description: "Please re-upload a clear, readable document.",
+          variant: "destructive",
+        });
+      }
+    } catch (error) {
+      console.error('Error handling document upload:', error);
     }
   };
 
-  const handleSignatureComplete = () => {
-    setSignatureCompleted(true);
-    toast({
-      title: "Signature Captured",
-      description: "Your electronic signature has been recorded successfully.",
-    });
+  const handleSignatureComplete = async () => {
+    if (!user) return;
+
+    try {
+      const { error } = await supabase
+        .from('submissions')
+        .update({
+          signature_data: 'signature_captured',
+          agreement_signed_at: new Date().toISOString()
+        })
+        .eq('user_id', user.id);
+
+      if (error) {
+        console.error('Error saving signature:', error);
+        return;
+      }
+
+      setSignatureCompleted(true);
+      toast({
+        title: "Signature Captured",
+        description: "Your electronic signature has been recorded successfully.",
+      });
+    } catch (error) {
+      console.error('Error handling signature:', error);
+    }
   };
 
   const canProceedToSignature = documents.every(doc => doc.verified);
   const canComplete = canProceedToSignature && signatureCompleted;
 
   const handleCompleteWorkflow = async () => {
-    // Simulate CRM integration
-    console.log("Integrating with CRM...", {
-      documents: documents.map(doc => ({ id: doc.id, name: doc.name, verified: doc.verified })),
-      signatureCompleted,
-      timestamp: new Date().toISOString(),
-    });
+    if (!user) return;
 
-    toast({
-      title: "Workflow Complete",
-      description: "All documents verified and data sent to CRM system.",
-    });
+    try {
+      // Update submission status
+      const { error } = await supabase
+        .from('submissions')
+        .update({
+          status: 'completed',
+          completed_at: new Date().toISOString(),
+          crm_synced: false
+        })
+        .eq('user_id', user.id);
 
-    setWorkflowCompleted(true);
-    setCurrentStep(2);
+      if (error) {
+        console.error('Error completing workflow:', error);
+        return;
+      }
+
+      // Simulate CRM integration
+      console.log("Integrating with CRM...", {
+        documents: documents.map(doc => ({ id: doc.id, name: doc.name, verified: doc.verified })),
+        signatureCompleted,
+        timestamp: new Date().toISOString(),
+      });
+
+      toast({
+        title: "Workflow Complete",
+        description: "All documents verified and data sent to CRM system.",
+      });
+
+      setWorkflowCompleted(true);
+      setCurrentStep(2);
+    } catch (error) {
+      console.error('Error completing workflow:', error);
+    }
   };
 
   if (workflowCompleted) {
