@@ -9,7 +9,9 @@ import CompletionScreen from "./CompletionScreen";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
 import { supabase } from "@/integrations/supabase/client";
-import { CheckCircle, Circle, Clock } from "lucide-react";
+import { useReminderSystem } from "@/hooks/useReminderSystem";
+import { syncToCRM, retryFailedSync, type CRMData } from "@/utils/crmIntegration";
+import { CheckCircle, Circle, Clock, AlertTriangle, RefreshCw } from "lucide-react";
 
 export interface DocumentType {
   id: string;
@@ -26,6 +28,7 @@ const DocumentCollectionFlow = () => {
   const { user } = useAuth();
   const [currentStep, setCurrentStep] = useState(0);
   const [submissionId, setSubmissionId] = useState<string | null>(null);
+  const [crmSyncStatus, setCrmSyncStatus] = useState<'pending' | 'success' | 'failed' | 'syncing'>('pending');
   const [documents, setDocuments] = useState<DocumentType[]>([
     {
       id: "proof-id",
@@ -72,6 +75,14 @@ const DocumentCollectionFlow = () => {
   const [signatureCompleted, setSignatureCompleted] = useState(false);
   const [workflowCompleted, setWorkflowCompleted] = useState(false);
 
+  // Initialize reminder system
+  const reminderSystem = useReminderSystem({
+    enabled: true,
+    incompleteDocumentDelay: 30, // 30 minutes for demo (would be longer in production)
+    missingSignatureDelay: 60, // 1 hour for demo
+    userContact: user?.email || ""
+  });
+
   const steps = [
     "Document Upload",
     "Electronic Signature", 
@@ -84,6 +95,31 @@ const DocumentCollectionFlow = () => {
       loadSubmissionData();
     }
   }, [user]);
+
+  // Set up reminders based on current state
+  useEffect(() => {
+    if (!user) return;
+
+    const allDocsVerified = documents.every(doc => doc.verified);
+    const hasIncompleteRequiredDocs = documents.some(doc => doc.required && !doc.verified);
+
+    if (hasIncompleteRequiredDocs && !allDocsVerified) {
+      reminderSystem.scheduleIncompleteReminder();
+    } else {
+      reminderSystem.cancelReminder("incomplete");
+    }
+
+    if (allDocsVerified && !signatureCompleted) {
+      reminderSystem.scheduleSignatureReminder();
+    } else {
+      reminderSystem.cancelReminder("signature");
+    }
+
+    return () => {
+      reminderSystem.cancelReminder("incomplete");
+      reminderSystem.cancelReminder("signature");
+    };
+  }, [documents, signatureCompleted, user, reminderSystem]);
 
   const loadSubmissionData = async () => {
     if (!user) return;
@@ -103,6 +139,8 @@ const DocumentCollectionFlow = () => {
 
       if (submission) {
         setSubmissionId(submission.id);
+        setCrmSyncStatus(submission.crm_synced ? 'success' : 'pending');
+        
         if (submission.status === 'completed') {
           setWorkflowCompleted(true);
           setCurrentStep(2);
@@ -225,40 +263,110 @@ const DocumentCollectionFlow = () => {
   const canComplete = canProceedToSignature && signatureCompleted;
 
   const handleCompleteWorkflow = async () => {
-    if (!user) return;
+    if (!user || !submissionId) return;
 
     try {
+      setCrmSyncStatus('syncing');
+
       // Update submission status
-      const { error } = await supabase
+      const { error: updateError } = await supabase
         .from('submissions')
         .update({
           status: 'completed',
-          completed_at: new Date().toISOString(),
-          crm_synced: false
+          completed_at: new Date().toISOString()
         })
         .eq('user_id', user.id);
 
-      if (error) {
-        console.error('Error completing workflow:', error);
+      if (updateError) {
+        console.error('Error completing workflow:', updateError);
+        setCrmSyncStatus('failed');
         return;
       }
 
-      // Simulate CRM integration
-      console.log("Integrating with CRM...", {
-        documents: documents.map(doc => ({ id: doc.id, name: doc.name, verified: doc.verified })),
-        signatureCompleted,
-        timestamp: new Date().toISOString(),
-      });
+      // Prepare CRM data
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('id', user.id)
+        .single();
 
-      toast({
-        title: "Workflow Complete",
-        description: "All documents verified and data sent to CRM system.",
-      });
+      const crmData: CRMData = {
+        userId: user.id,
+        userProfile: {
+          firstName: profile?.first_name || "",
+          lastName: profile?.last_name || "",
+          email: profile?.email || user.email || "",
+          phone: profile?.phone || undefined
+        },
+        documents: documents.map(doc => ({
+          type: doc.id,
+          fileName: doc.file?.name || "",
+          verified: doc.verified,
+          uploadDate: new Date().toISOString()
+        })),
+        signature: {
+          signed: signatureCompleted,
+          signedAt: new Date().toISOString()
+        },
+        submissionId,
+        completedAt: new Date().toISOString()
+      };
 
-      setWorkflowCompleted(true);
-      setCurrentStep(2);
+      // Sync to CRM
+      const syncResult = await syncToCRM(crmData);
+
+      if (syncResult.success) {
+        setCrmSyncStatus('success');
+        toast({
+          title: "Workflow Complete",
+          description: "All documents verified and data sent to CRM system.",
+        });
+        setWorkflowCompleted(true);
+        setCurrentStep(2);
+      } else {
+        setCrmSyncStatus('failed');
+        toast({
+          title: "CRM Sync Failed",
+          description: syncResult.error || "Failed to sync with CRM. Will retry automatically.",
+          variant: "destructive",
+        });
+      }
+
     } catch (error) {
       console.error('Error completing workflow:', error);
+      setCrmSyncStatus('failed');
+      toast({
+        title: "Error",
+        description: "Failed to complete workflow. Please try again.",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleRetryCrmSync = async () => {
+    if (!submissionId) return;
+
+    setCrmSyncStatus('syncing');
+    toast({
+      title: "Retrying CRM Sync",
+      description: "Attempting to sync data with CRM system...",
+    });
+
+    const result = await retryFailedSync(submissionId);
+    
+    if (result.success) {
+      setCrmSyncStatus('success');
+      toast({
+        title: "CRM Sync Successful",
+        description: "Data has been successfully synced to CRM system.",
+      });
+    } else {
+      setCrmSyncStatus('failed');
+      toast({
+        title: "CRM Sync Failed",
+        description: result.error || "Failed to sync with CRM system.",
+        variant: "destructive",
+      });
     }
   };
 
@@ -272,9 +380,22 @@ const DocumentCollectionFlow = () => {
       <Card className="p-6 mb-8">
         <div className="flex justify-between items-center mb-4">
           <h3 className="text-lg font-semibold">Application Progress</h3>
-          <span className="text-sm text-gray-600">
-            {uploadedDocuments} of {totalDocuments} documents verified
-          </span>
+          <div className="flex items-center space-x-4">
+            <span className="text-sm text-gray-600">
+              {uploadedDocuments} of {totalDocuments} documents verified
+            </span>
+            {crmSyncStatus === 'failed' && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleRetryCrmSync}
+                className="flex items-center space-x-1 text-orange-600 border-orange-200"
+              >
+                <RefreshCw className="h-3 w-3" />
+                <span>Retry CRM Sync</span>
+              </Button>
+            )}
+          </div>
         </div>
         <Progress value={progress} className="mb-4" />
         
@@ -302,6 +423,39 @@ const DocumentCollectionFlow = () => {
             </div>
           ))}
         </div>
+
+        {/* CRM Sync Status Indicator */}
+        {currentStep >= 1 && (
+          <div className="mt-4 pt-4 border-t border-gray-200">
+            <div className="flex items-center space-x-2">
+              <span className="text-sm text-gray-600">CRM Sync Status:</span>
+              {crmSyncStatus === 'success' && (
+                <div className="flex items-center space-x-1 text-green-600">
+                  <CheckCircle className="h-4 w-4" />
+                  <span className="text-sm">Synced</span>
+                </div>
+              )}
+              {crmSyncStatus === 'syncing' && (
+                <div className="flex items-center space-x-1 text-blue-600">
+                  <RefreshCw className="h-4 w-4 animate-spin" />
+                  <span className="text-sm">Syncing...</span>
+                </div>
+              )}
+              {crmSyncStatus === 'failed' && (
+                <div className="flex items-center space-x-1 text-red-600">
+                  <AlertTriangle className="h-4 w-4" />
+                  <span className="text-sm">Failed</span>
+                </div>
+              )}
+              {crmSyncStatus === 'pending' && (
+                <div className="flex items-center space-x-1 text-gray-500">
+                  <Clock className="h-4 w-4" />
+                  <span className="text-sm">Pending</span>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </Card>
 
       {/* Current Step Content */}
@@ -347,10 +501,17 @@ const DocumentCollectionFlow = () => {
             </Button>
             <Button
               onClick={handleCompleteWorkflow}
-              disabled={!canComplete}
+              disabled={!canComplete || crmSyncStatus === 'syncing'}
               className="px-8"
             >
-              Complete Application
+              {crmSyncStatus === 'syncing' ? (
+                <>
+                  <RefreshCw className="h-4 w-4 animate-spin mr-2" />
+                  Processing...
+                </>
+              ) : (
+                'Complete Application'
+              )}
             </Button>
           </div>
         </Card>

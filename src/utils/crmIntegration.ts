@@ -1,76 +1,176 @@
 
+import { supabase } from "@/integrations/supabase/client";
+
 export interface CRMData {
-  documents: {
-    id: string;
-    name: string;
-    verified: boolean;
-    fileUrl?: string;
-  }[];
-  signatureCompleted: boolean;
-  userInfo?: {
-    name?: string;
-    email?: string;
+  userId: string;
+  userProfile: {
+    firstName: string;
+    lastName: string;
+    email: string;
     phone?: string;
   };
-  timestamp: string;
-  referenceId: string;
+  documents: Array<{
+    type: string;
+    fileName: string;
+    verified: boolean;
+    uploadDate: string;
+  }>;
+  signature: {
+    signed: boolean;
+    signedAt?: string;
+  };
+  submissionId: string;
+  completedAt: string;
 }
 
-export const sendToCRM = async (data: CRMData, webhookUrl?: string): Promise<boolean> => {
+export interface CRMSyncResult {
+  success: boolean;
+  crmId?: string;
+  error?: string;
+  retryable: boolean;
+}
+
+export const syncToCRM = async (data: CRMData): Promise<CRMSyncResult> => {
   try {
-    console.log("Sending data to CRM:", data);
+    console.log("Syncing to CRM:", data);
+    
+    // Simulate API call to external CRM
+    // In production, this would be a real API call
+    const response = await simulateCRMSync(data);
+    
+    if (response.success) {
+      // Update submission with CRM sync status
+      await supabase
+        .from('submissions')
+        .update({
+          crm_synced: true,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', data.submissionId);
 
-    // If webhook URL is provided, use it; otherwise simulate CRM integration
-    if (webhookUrl) {
-      const response = await fetch(webhookUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          ...data,
-          source: "SecureFlow Document Collection",
-          status: "completed",
-        }),
-      });
-
-      return response.ok;
-    } else {
-      // Simulate CRM API call
-      await new Promise(resolve => setTimeout(resolve, 1500));
-      
-      // Simulate successful integration
-      console.log("CRM Integration successful:", {
-        recordId: `CRM-${Date.now()}`,
-        status: "created",
-        data,
-      });
-      
-      return true;
+      return {
+        success: true,
+        crmId: response.crmId,
+        retryable: false
+      };
     }
+
+    return {
+      success: false,
+      error: response.error,
+      retryable: response.retryable
+    };
+
   } catch (error) {
-    console.error("CRM integration failed:", error);
-    return false;
+    console.error("CRM sync error:", error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Unknown error",
+      retryable: true
+    };
   }
 };
 
-export const sendReminder = async (type: "incomplete" | "missing_signature", userContact: string): Promise<void> => {
-  console.log(`Sending ${type} reminder to:`, userContact);
+const simulateCRMSync = async (data: CRMData): Promise<{
+  success: boolean;
+  crmId?: string;
+  error?: string;
+  retryable: boolean;
+}> => {
+  // Simulate network delay
+  await new Promise(resolve => setTimeout(resolve, 1000 + Math.random() * 2000));
   
-  const messages = {
-    incomplete: "Reminder: Please complete your document upload to continue with your application.",
-    missing_signature: "Reminder: Your electronic signature is required to finalize your application.",
-  };
-
-  // Simulate sending reminder (SMS/Email)
-  await new Promise(resolve => setTimeout(resolve, 500));
-  console.log("Reminder sent:", messages[type]);
+  // Simulate different outcomes
+  const outcomes = [
+    { success: true, crmId: `CRM-${Date.now()}`, retryable: false },
+    { success: false, error: "Network timeout", retryable: true },
+    { success: false, error: "Invalid data format", retryable: false },
+    { success: true, crmId: `CRM-${Date.now()}`, retryable: false }
+  ];
+  
+  // 80% success rate
+  return Math.random() > 0.2 ? outcomes[0] : outcomes[1];
 };
 
-export const updateGHLTags = async (contactId: string, tags: string[]): Promise<void> => {
-  console.log("Updating GHL tags for contact:", contactId, "with tags:", tags);
+export const sendReminder = async (type: "incomplete" | "missing_signature", contact: string) => {
+  console.log(`Sending ${type} reminder to ${contact}`);
   
-  // Simulate GHL API call to update tags
-  await new Promise(resolve => setTimeout(resolve, 1000));
-  console.log("GHL tags updated successfully");
+  const messages = {
+    incomplete: "📋 Reminder: You have incomplete document uploads. Please complete your submission to proceed.",
+    missing_signature: "✍️ Reminder: Please sign your agreement to complete the process."
+  };
+
+  // In production, this would send actual SMS/email
+  // For now, we'll just log it
+  console.log(`SMS to ${contact}: ${messages[type]}`);
+  
+  // You could integrate with services like Twilio, SendGrid, etc.
+  return { sent: true, message: messages[type] };
+};
+
+export const retryFailedSync = async (submissionId: string, maxRetries: number = 3): Promise<CRMSyncResult> => {
+  let retryCount = 0;
+  
+  while (retryCount < maxRetries) {
+    console.log(`CRM sync retry attempt ${retryCount + 1} for submission ${submissionId}`);
+    
+    // Get submission data
+    const { data: submission, error } = await supabase
+      .from('submissions')
+      .select(`
+        *,
+        profiles(*),
+        documents(*)
+      `)
+      .eq('id', submissionId)
+      .single();
+
+    if (error || !submission) {
+      return {
+        success: false,
+        error: "Submission not found",
+        retryable: false
+      };
+    }
+
+    const crmData: CRMData = {
+      userId: submission.user_id,
+      userProfile: {
+        firstName: submission.profiles?.first_name || "",
+        lastName: submission.profiles?.last_name || "",
+        email: submission.profiles?.email || "",
+        phone: submission.profiles?.phone || undefined
+      },
+      documents: submission.documents?.map((doc: any) => ({
+        type: doc.document_type,
+        fileName: doc.file_name,
+        verified: doc.verification_status === 'verified',
+        uploadDate: doc.created_at
+      })) || [],
+      signature: {
+        signed: !!submission.signature_data,
+        signedAt: submission.agreement_signed_at
+      },
+      submissionId: submission.id,
+      completedAt: submission.completed_at || new Date().toISOString()
+    };
+
+    const result = await syncToCRM(crmData);
+    
+    if (result.success || !result.retryable) {
+      return result;
+    }
+    
+    retryCount++;
+    if (retryCount < maxRetries) {
+      // Exponential backoff
+      await new Promise(resolve => setTimeout(resolve, Math.pow(2, retryCount) * 1000));
+    }
+  }
+  
+  return {
+    success: false,
+    error: `Failed after ${maxRetries} retry attempts`,
+    retryable: false
+  };
 };
